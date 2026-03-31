@@ -1,6 +1,10 @@
 # ANNCSU Aggiudicatari – QGIS Processing Tool
 
-Script Processing per QGIS che collega:
+Questo script processingper QGIS permette di ricostruire, per ciascun comune, 
+chi si è aggiudicato i finanziamenti della misura 1.3.1 (ANNCSU),
+incrociando open data PA Digitale 2026 e ANAC.
+
+Collega:
 
 * Open data PA Digitale 2026 (candidature finanziate)
 * Dataset ANAC (CUP → CIG → aggiudicatari)
