@@ -92,5 +92,6 @@ Federico Cortese
 
 ## Crediti
 
-Il flusso di lavoro per l’incrocio tra dataset ANNCSU e CIG degli aggiudicatari è stato ispirato dal lavoro di Dennis Angemi
-Lo script è stato sviluppato con il supporto di ChatGPT (modello GPT-5.x, OpenAI)
+Il flusso di lavoro per l’incrocio tra dataset ANNCSU e CIG degli aggiudicatari è stato ispirato dal lavoro di **Dennis Angemi**.
+
+Lo script è stato sviluppato con il supporto di **ChatGPT** (modello GPT-5.x, OpenAI)
