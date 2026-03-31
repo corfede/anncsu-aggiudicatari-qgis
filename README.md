@@ -55,6 +55,12 @@ e produce:
 
 ---
 
+## Esempio output
+
+![mappa](anncsu-aggiudicatari.png)
+
+---
+
 ## Installazione
 
 In QGIS:
