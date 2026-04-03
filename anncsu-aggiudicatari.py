@@ -31,7 +31,7 @@ import unicodedata
 from collections import defaultdict, Counter
 
 
-class AnncsuAggiudicatariAlgorithmV22(QgsProcessingAlgorithm):
+class AnncsuAggiudicatariAlgorithmV221(QgsProcessingAlgorithm):
     PARAM_COMUNI = "COMUNI"
     PARAM_URL_CAND = "URL_CAND"
     PARAM_CUP = "CUP"
@@ -46,13 +46,13 @@ class AnncsuAggiudicatariAlgorithmV22(QgsProcessingAlgorithm):
         return string
 
     def createInstance(self):
-        return AnncsuAggiudicatariAlgorithmV22()
+        return AnncsuAggiudicatariAlgorithmV221()
 
     def name(self):
-        return "anncsu_aggiudicatari_processing_v22"
+        return "anncsu_aggiudicatari_processing_v221"
 
     def displayName(self):
-        return "ANNCSU aggiudicatari comuni v2.2"
+        return "ANNCSU aggiudicatari comuni v2.2.1"
 
     def group(self):
         return "Custom scripts"
@@ -63,9 +63,8 @@ class AnncsuAggiudicatariAlgorithmV22(QgsProcessingAlgorithm):
     def shortHelpString(self):
         return (
             "Incrocia candidature ANNCSU, CUP, CIG e aggiudicatari ANAC. "
-            "Gestisce più CIG per CUP, crea layer comuni aggregato, "
-            "layer dettaglio CIG e tabella top operatori. "
-            "Usa join ISTAT e fallback su nome comune normalizzato."
+            "Gestisce multi-CIG, layer dettaglio CIG, fallback su nome comune "
+            "e usa CF/id aggiudicazione quando manca la denominazione."
         )
 
     def initAlgorithm(self, config=None):
@@ -168,7 +167,6 @@ class AnncsuAggiudicatariAlgorithmV22(QgsProcessingAlgorithm):
 
     def normalize_name(self, s):
         s = self.safe_str(s).lower().strip()
-
         s = s.replace("’", "'").replace("`", "'").replace("´", "'")
 
         s = "".join(
@@ -332,7 +330,6 @@ class AnncsuAggiudicatariAlgorithmV22(QgsProcessingAlgorithm):
                 type_name = "integer"
             elif qtype == QMetaType.Type.Double:
                 type_name = "double"
-
             fields_obj.append(QgsField(name, qtype, type_name, length, precision))
 
     def get_common_code_field(self, layer):
@@ -340,18 +337,14 @@ class AnncsuAggiudicatariAlgorithmV22(QgsProcessingAlgorithm):
             idx = layer.fields().indexOf(cand)
             if idx != -1:
                 return cand
-        raise QgsProcessingException(
-            "Nel layer comuni non trovo il campo PRO_COM_T/codice ISTAT comune."
-        )
+        raise QgsProcessingException("Nel layer comuni non trovo il campo PRO_COM_T/codice ISTAT comune.")
 
     def get_common_name_field(self, layer):
         for cand in ["COMUNE", "comune", "DENOMINAZIONE", "denominazione", "NOME", "nome"]:
             idx = layer.fields().indexOf(cand)
             if idx != -1:
                 return cand
-        raise QgsProcessingException(
-            "Nel layer comuni non trovo il campo nome comune (es. COMUNE)."
-        )
+        raise QgsProcessingException("Nel layer comuni non trovo il campo nome comune (es. COMUNE).")
 
     def distinct_color(self, i):
         palette = [
@@ -361,6 +354,30 @@ class AnncsuAggiudicatariAlgorithmV22(QgsProcessingAlgorithm):
             "#fb8072", "#fdb462", "#b3de69", "#fccde5", "#bc80bd"
         ]
         return QColor(palette[i % len(palette)])
+
+    def get_operatore_key_label(self, row):
+        candidates = [
+            "denominazione",
+            "ragione_sociale",
+            "aggiudicatario",
+            "denominazione_aggiudicatario"
+        ]
+        for c in candidates:
+            val = self.safe_str(row.get(c))
+            if val:
+                norm = self.norm_text(val)
+                if norm:
+                    return norm, val
+
+        cf = self.safe_str(row.get("codice_fiscale"))
+        if cf:
+            return f"CF:{cf}", f"CF:{cf}"
+
+        ida = self.safe_str(row.get("id_aggiudicazione"))
+        if ida:
+            return f"ID_AGG:{ida}", f"ID_AGG:{ida}"
+
+        return "", ""
 
     # ------------------------------------------------------------
     # Main
@@ -389,13 +406,10 @@ class AnncsuAggiudicatariAlgorithmV22(QgsProcessingAlgorithm):
         else:
             os.makedirs(work_dir, exist_ok=True)
 
-        feedback.pushInfo("=== Avvio elaborazione v2.2 multi-CIG + join nome comune ===")
+        feedback.pushInfo("=== Avvio elaborazione v2.2.1 ===")
         feedback.pushInfo(f"Cartella di lavoro: {work_dir}")
 
-        # ------------------------------------------------------------
-        # 1. Candidature
-        # ------------------------------------------------------------
-
+        # 1. candidature
         cand_local = os.path.join(work_dir, "candidature_finanziate_131.csv")
         self.download_to_file(url_cand, cand_local, feedback)
 
@@ -410,14 +424,11 @@ class AnncsuAggiudicatariAlgorithmV22(QgsProcessingAlgorithm):
 
         comune_to_cup = {}
         comune_to_importo = defaultdict(float)
-
         comune_name_to_cup = {}
         comune_name_to_importo = defaultdict(float)
 
         rows_total = 0
         rows_anncsu = 0
-
-        feedback.pushInfo("Lettura candidature ANNCSU...")
 
         for row in cand_reader:
             rows_total += 1
@@ -449,20 +460,14 @@ class AnncsuAggiudicatariAlgorithmV22(QgsProcessingAlgorithm):
         feedback.pushInfo(f"Comuni ANNCSU con CUP via ISTAT: {len(comune_to_cup)}")
         feedback.pushInfo(f"Comuni ANNCSU con CUP via nome: {len(comune_name_to_cup)}")
 
-        # ------------------------------------------------------------
-        # 2. CUP -> CIG (multi)
-        # ------------------------------------------------------------
-
+        # 2. CUP -> CIG multi
         cup_reader = self.csv_reader_from_any(cup_csv_o_zip, work_dir, feedback, preferred_member_contains="cup")
         cup_fields = cup_reader.fieldnames or []
-
         cup_field = self.detect_field(cup_fields, ["cup", "codice_cup"], "cup")
         cig_field_in_cup = self.detect_field(cup_fields, ["cig", "codice_cig"], "cup")
 
         wanted_cups = set(comune_to_cup.values()) | set(comune_name_to_cup.values())
         cup_to_cigs = defaultdict(list)
-
-        feedback.pushInfo("Indicizzazione CUP -> CIG (multi)...")
 
         for row in cup_reader:
             cup = self.norm_text(row.get(cup_field))
@@ -474,18 +479,12 @@ class AnncsuAggiudicatariAlgorithmV22(QgsProcessingAlgorithm):
                 cup_to_cigs[cup].append(cig)
 
         cups_with_cig = sum(1 for c in wanted_cups if len(cup_to_cigs.get(c, [])) > 0)
-        feedback.pushInfo(f"CUP richiesti: {len(wanted_cups)}")
-        feedback.pushInfo(f"CUP con almeno un CIG: {cups_with_cig}")
 
-        # ------------------------------------------------------------
-        # 3. Aggiudicatari ANAC
-        # ------------------------------------------------------------
-
+        # 3. aggiudicatari
         agg_reader = self.csv_reader_from_any(aggiudicatari_csv, work_dir, feedback, preferred_member_contains="aggiudicatari")
         agg_fields = agg_reader.fieldnames or []
 
         agg_cig = self.detect_field(agg_fields, ["cig", "codice_cig"], "aggiudicatari")
-        agg_den = self.detect_field(agg_fields, ["denominazione", "ragione_sociale", "aggiudicatario"], "aggiudicatari")
         agg_ruolo = self.choose_first_existing(agg_fields, ["ruolo"])
 
         wanted_cigs = set()
@@ -495,8 +494,6 @@ class AnncsuAggiudicatariAlgorithmV22(QgsProcessingAlgorithm):
 
         agg_by_cig = {}
         multi_count = Counter()
-
-        feedback.pushInfo("Filtraggio aggiudicatari per CIG...")
 
         def role_rank(row):
             if not agg_ruolo:
@@ -520,13 +517,11 @@ class AnncsuAggiudicatariAlgorithmV22(QgsProcessingAlgorithm):
                 if role_rank(row) < role_rank(agg_by_cig[cig]):
                     agg_by_cig[cig] = row
 
+        feedback.pushInfo(f"CUP con almeno un CIG: {cups_with_cig}")
         feedback.pushInfo(f"CIG richiesti: {len(wanted_cigs)}")
-        feedback.pushInfo(f"CIG con aggiudicatario ANAC: {len(agg_by_cig)}")
+        feedback.pushInfo(f"CIG con match in aggiudicatari ANAC: {len(agg_by_cig)}")
 
-        # ------------------------------------------------------------
-        # 4. Layer output - comuni
-        # ------------------------------------------------------------
-
+        # 4. layer comuni
         pro_com_t = self.get_common_code_field(comuni)
         comune_nome_field = self.get_common_name_field(comuni)
 
@@ -535,7 +530,7 @@ class AnncsuAggiudicatariAlgorithmV22(QgsProcessingAlgorithm):
             ("istat_match", QMetaType.Type.QString, 20, 0),
             ("cup_match", QMetaType.Type.QString, 64, 0),
             ("cig_match", QMetaType.Type.QString, 1000, 0),
-            ("match_status", QMetaType.Type.QString, 32, 0),
+            ("match_status", QMetaType.Type.QString, 40, 0),
             ("fonte_match", QMetaType.Type.QString, 64, 0),
             ("fin_comune", QMetaType.Type.Double, 20, 2),
             ("top20_agg", QMetaType.Type.QString, 254, 0),
@@ -544,6 +539,8 @@ class AnncsuAggiudicatariAlgorithmV22(QgsProcessingAlgorithm):
             ("operatori_all", QMetaType.Type.QString, 1000, 0),
             ("join_tipo", QMetaType.Type.QString, 20, 0),
             ("comune_norm", QMetaType.Type.QString, 254, 0),
+            ("operatore_key", QMetaType.Type.QString, 254, 0),
+            ("operatore_label", QMetaType.Type.QString, 254, 0),
         ]:
             self.add_field_if_absent(comuni_fields, extra[0], extra[1], extra[2], extra[3])
 
@@ -556,10 +553,7 @@ class AnncsuAggiudicatariAlgorithmV22(QgsProcessingAlgorithm):
         out_pr.addAttributes(comuni_fields)
         out_layer.updateFields()
 
-        # ------------------------------------------------------------
-        # 5. Layer output - dettaglio CIG
-        # ------------------------------------------------------------
-
+        # 5. layer dettaglio
         detail_fields = self.clone_fields(comuni)
         for extra in [
             ("istat_match", QMetaType.Type.QString, 20, 0),
@@ -568,6 +562,8 @@ class AnncsuAggiudicatariAlgorithmV22(QgsProcessingAlgorithm):
             ("fonte_match", QMetaType.Type.QString, 64, 0),
             ("fin_comune", QMetaType.Type.Double, 20, 2),
             ("operatore", QMetaType.Type.QString, 254, 0),
+            ("operatore_key", QMetaType.Type.QString, 254, 0),
+            ("operatore_label", QMetaType.Type.QString, 254, 0),
             ("num_operatori_cig", QMetaType.Type.Int, 10, 0),
             ("join_tipo", QMetaType.Type.QString, 20, 0),
             ("comune_norm", QMetaType.Type.QString, 254, 0),
@@ -585,8 +581,6 @@ class AnncsuAggiudicatariAlgorithmV22(QgsProcessingAlgorithm):
         status_counts = Counter()
         operator_counter = Counter()
         operator_fund = defaultdict(float)
-
-        feedback.pushInfo("Costruzione layer finale comuni e layer dettaglio CIG...")
 
         new_feats = []
         detail_feats = []
@@ -612,6 +606,8 @@ class AnncsuAggiudicatariAlgorithmV22(QgsProcessingAlgorithm):
             nf["operatori_all"] = None
             nf["join_tipo"] = None
             nf["comune_norm"] = comune_nome_norm
+            nf["operatore_key"] = None
+            nf["operatore_label"] = None
 
             cup = None
             fin_comune_val = 0.0
@@ -649,6 +645,7 @@ class AnncsuAggiudicatariAlgorithmV22(QgsProcessingAlgorithm):
             matched_cigs = []
             operator_counter_local = Counter()
             operator_best_row = {}
+            operator_label_map = {}
 
             for cig in cigs:
                 agg_row = agg_by_cig.get(cig)
@@ -657,11 +654,12 @@ class AnncsuAggiudicatariAlgorithmV22(QgsProcessingAlgorithm):
 
                 matched_cigs.append(cig)
 
-                operatore = self.norm_text(agg_row.get(agg_den))
-                if operatore:
-                    operator_counter_local[operatore] += 1
-                    if operatore not in operator_best_row:
-                        operator_best_row[operatore] = agg_row
+                operatore_key, operatore_label = self.get_operatore_key_label(agg_row)
+                if operatore_key:
+                    operator_counter_local[operatore_key] += 1
+                    operator_label_map[operatore_key] = operatore_label
+                    if operatore_key not in operator_best_row:
+                        operator_best_row[operatore_key] = agg_row
 
                 df = QgsFeature(detail_layer.fields())
                 df.setGeometry(ft.geometry())
@@ -674,7 +672,9 @@ class AnncsuAggiudicatariAlgorithmV22(QgsProcessingAlgorithm):
                 df["cig_match"] = cig
                 df["fonte_match"] = "ANAC_AGGIUDICATARI"
                 df["fin_comune"] = float(fin_comune_val)
-                df["operatore"] = operatore
+                df["operatore"] = operatore_label
+                df["operatore_key"] = operatore_key
+                df["operatore_label"] = operatore_label
                 df["num_operatori_cig"] = 1 + int(multi_count.get(cig, 0))
                 df["join_tipo"] = join_tipo
                 df["comune_norm"] = comune_nome_norm
@@ -694,19 +694,22 @@ class AnncsuAggiudicatariAlgorithmV22(QgsProcessingAlgorithm):
                 new_feats.append(nf)
                 continue
 
-            dominant_operator = sorted(
-                operator_counter_local.keys(),
-                key=lambda op: (-operator_counter_local[op], op)
-            )[0] if operator_counter_local else None
+            if operator_counter_local:
+                dominant_operator_key = sorted(
+                    operator_counter_local.keys(),
+                    key=lambda op: (-operator_counter_local[op], op)
+                )[0]
 
-            nf["operatori_all"] = " | ".join(
-                [f"{op} ({cnt})" for op, cnt in operator_counter_local.most_common(10)]
-            ) if operator_counter_local else None
+                dominant_operator_label = operator_label_map.get(dominant_operator_key, dominant_operator_key)
+                best_row = operator_best_row[dominant_operator_key]
 
-            nf["fonte_match"] = "ANAC_AGGIUDICATARI"
+                nf["operatori_all"] = " | ".join(
+                    [f"{operator_label_map.get(op, op)} ({cnt})" for op, cnt in operator_counter_local.most_common(10)]
+                )
+                nf["fonte_match"] = "ANAC_AGGIUDICATARI"
+                nf["operatore_key"] = dominant_operator_key
+                nf["operatore_label"] = dominant_operator_label
 
-            if dominant_operator:
-                best_row = operator_best_row[dominant_operator]
                 for f in agg_fields:
                     nf[f"agg_{f}"] = self.safe_str(best_row.get(f))
 
@@ -714,18 +717,19 @@ class AnncsuAggiudicatariAlgorithmV22(QgsProcessingAlgorithm):
                 idx_agg_rs = out_layer.fields().indexOf("agg_ragione_sociale")
 
                 if idx_agg_den != -1:
-                    nf["agg_denominazione"] = dominant_operator
+                    nf["agg_denominazione"] = dominant_operator_label
                 elif idx_agg_rs != -1:
-                    nf["agg_ragione_sociale"] = dominant_operator
+                    nf["agg_ragione_sociale"] = dominant_operator_label
 
                 nf["match_status"] = "OK"
                 status_counts["OK"] += 1
 
-                operator_counter[dominant_operator] += 1
-                operator_fund[dominant_operator] += fin_comune_val
+                operator_counter[dominant_operator_key] += 1
+                operator_fund[dominant_operator_key] += fin_comune_val
             else:
-                nf["match_status"] = "NO_AGGIUD"
-                status_counts["NO_AGGIUD"] += 1
+                nf["fonte_match"] = "ANAC_AGGIUDICATARI"
+                nf["match_status"] = "MATCH_SENZA_IDENTIFICATIVO"
+                status_counts["MATCH_SENZA_IDENTIFICATIVO"] += 1
 
             new_feats.append(nf)
 
@@ -735,10 +739,7 @@ class AnncsuAggiudicatariAlgorithmV22(QgsProcessingAlgorithm):
         detail_pr.addFeatures(detail_feats)
         detail_layer.updateExtents()
 
-        # ------------------------------------------------------------
-        # 6. Top N
-        # ------------------------------------------------------------
-
+        # top
         ranking = sorted(
             operator_counter.keys(),
             key=lambda op: (-operator_counter[op], -operator_fund[op], op)
@@ -748,23 +749,16 @@ class AnncsuAggiudicatariAlgorithmV22(QgsProcessingAlgorithm):
 
         out_layer.startEditing()
         idx_top = out_layer.fields().indexOf("top20_agg")
-
-        idx_den = out_layer.fields().indexOf("agg_denominazione")
-        idx_alt = out_layer.fields().indexOf("agg_ragione_sociale")
+        idx_key = out_layer.fields().indexOf("operatore_key")
 
         for ft in out_layer.getFeatures():
-            den = ""
-            if idx_den != -1:
-                den = self.norm_text(ft[idx_den])
-            elif idx_alt != -1:
-                den = self.norm_text(ft[idx_alt])
-
+            op_key = self.safe_str(ft[idx_key])
             status = self.safe_str(ft["match_status"])
 
-            if status in ("NO_CUP", "NO_CIG", "NO_AGGIUD", "NESSUN_MATCH") or not den:
+            if status in ("NO_CUP", "NO_CIG", "NO_AGGIUD", "NESSUN_MATCH") or not op_key:
                 value = "NESSUN_MATCH"
-            elif den in top_set:
-                value = den
+            elif op_key in top_set:
+                value = op_key
             else:
                 value = "ALTRO"
 
@@ -772,15 +766,12 @@ class AnncsuAggiudicatariAlgorithmV22(QgsProcessingAlgorithm):
 
         out_layer.commitChanges()
 
-        # ------------------------------------------------------------
-        # 7. Tabella top
-        # ------------------------------------------------------------
-
+        # top table
         top_tbl = QgsVectorLayer("None", output_top_name, "memory")
         top_pr = top_tbl.dataProvider()
         top_pr.addAttributes([
             QgsField("rank", QMetaType.Type.Int, "integer", 10, 0),
-            QgsField("operatore", QMetaType.Type.QString, "string", 254, 0),
+            QgsField("operatore_key", QMetaType.Type.QString, "string", 254, 0),
             QgsField("n_comuni", QMetaType.Type.Int, "integer", 10, 0),
             QgsField("somma_fin", QMetaType.Type.Double, "double", 20, 2),
         ])
@@ -790,7 +781,7 @@ class AnncsuAggiudicatariAlgorithmV22(QgsProcessingAlgorithm):
         for i, op in enumerate(top_ops, start=1):
             f = QgsFeature(top_tbl.fields())
             f["rank"] = i
-            f["operatore"] = op
+            f["operatore_key"] = op
             f["n_comuni"] = int(operator_counter[op])
             f["somma_fin"] = float(operator_fund[op])
             top_feats.append(f)
@@ -798,10 +789,7 @@ class AnncsuAggiudicatariAlgorithmV22(QgsProcessingAlgorithm):
         top_pr.addFeatures(top_feats)
         top_tbl.updateExtents()
 
-        # ------------------------------------------------------------
-        # 8. Salvataggio GPKG
-        # ------------------------------------------------------------
-
+        # save gpkg
         if os.path.exists(output_gpkg):
             try:
                 os.remove(output_gpkg)
@@ -814,12 +802,8 @@ class AnncsuAggiudicatariAlgorithmV22(QgsProcessingAlgorithm):
         opts.actionOnExistingFile = QgsVectorFileWriter.CreateOrOverwriteFile
 
         res1 = QgsVectorFileWriter.writeAsVectorFormatV3(
-            out_layer,
-            output_gpkg,
-            context.transformContext(),
-            opts
+            out_layer, output_gpkg, context.transformContext(), opts
         )
-
         if res1[0] != QgsVectorFileWriter.NoError:
             raise QgsProcessingException(f"Errore scrittura layer comuni in GPKG: {res1}")
 
@@ -829,12 +813,8 @@ class AnncsuAggiudicatariAlgorithmV22(QgsProcessingAlgorithm):
         opts_detail.actionOnExistingFile = QgsVectorFileWriter.CreateOrOverwriteLayer
 
         res_detail = QgsVectorFileWriter.writeAsVectorFormatV3(
-            detail_layer,
-            output_gpkg,
-            context.transformContext(),
-            opts_detail
+            detail_layer, output_gpkg, context.transformContext(), opts_detail
         )
-
         if res_detail[0] != QgsVectorFileWriter.NoError:
             raise QgsProcessingException(f"Errore scrittura layer dettaglio in GPKG: {res_detail}")
 
@@ -844,19 +824,12 @@ class AnncsuAggiudicatariAlgorithmV22(QgsProcessingAlgorithm):
         opts2.actionOnExistingFile = QgsVectorFileWriter.CreateOrOverwriteLayer
 
         res2 = QgsVectorFileWriter.writeAsVectorFormatV3(
-            top_tbl,
-            output_gpkg,
-            context.transformContext(),
-            opts2
+            top_tbl, output_gpkg, context.transformContext(), opts2
         )
-
         if res2[0] != QgsVectorFileWriter.NoError:
             raise QgsProcessingException(f"Errore scrittura tabella top in GPKG: {res2}")
 
-        # ------------------------------------------------------------
-        # 9. Ricarica layer
-        # ------------------------------------------------------------
-
+        # reload
         final_uri = f"{output_gpkg}|layername={output_layer_name}"
         detail_uri = f"{output_gpkg}|layername={output_detail_name}"
         top_uri = f"{output_gpkg}|layername={output_top_name}"
@@ -876,12 +849,8 @@ class AnncsuAggiudicatariAlgorithmV22(QgsProcessingAlgorithm):
         QgsProject.instance().addMapLayer(detail_loaded)
         QgsProject.instance().addMapLayer(top_loaded)
 
-        # ------------------------------------------------------------
-        # 10. Tematizzazione layer comuni
-        # ------------------------------------------------------------
-
+        # style
         cats = []
-
         for i, op in enumerate(top_ops):
             sym = QgsSymbol.defaultSymbol(final_loaded.geometryType())
             sym.setColor(self.distinct_color(i))
@@ -902,10 +871,7 @@ class AnncsuAggiudicatariAlgorithmV22(QgsProcessingAlgorithm):
         final_loaded.setRenderer(renderer)
         final_loaded.triggerRepaint()
 
-        # ------------------------------------------------------------
-        # 11. Report
-        # ------------------------------------------------------------
-
+        # report
         fonte_counter = Counter()
         multi_cig_comuni = 0
         multi_match_cig_comuni = 0
@@ -931,13 +897,13 @@ class AnncsuAggiudicatariAlgorithmV22(QgsProcessingAlgorithm):
         feedback.pushInfo(f"Comuni con CUP via nome: {len(comune_name_to_cup)}")
         feedback.pushInfo(f"CUP con almeno un CIG: {cups_with_cig}")
         feedback.pushInfo(f"CIG richiesti complessivi: {len(wanted_cigs)}")
-        feedback.pushInfo(f"CIG con aggiudicatario ANAC: {len(agg_by_cig)}")
+        feedback.pushInfo(f"CIG con match in aggiudicatari ANAC: {len(agg_by_cig)}")
         feedback.pushInfo(f"Comuni con più di un CIG: {multi_cig_comuni}")
         feedback.pushInfo(f"Comuni con più di un CIG matchato: {multi_match_cig_comuni}")
         feedback.pushInfo(f"Feature layer dettaglio CIG: {len(detail_feats)}")
         feedback.pushInfo(f"Comuni recuperati con join su nome: {join_nome_count}")
 
-        for k in ["OK", "NO_CUP", "NO_CIG", "NO_AGGIUD"]:
+        for k in ["OK", "MATCH_SENZA_IDENTIFICATIVO", "NO_CUP", "NO_CIG", "NO_AGGIUD"]:
             feedback.pushInfo(f"{k}: {status_counts.get(k, 0)}")
 
         feedback.pushInfo("=== FONTI MATCH ===")
