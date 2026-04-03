@@ -1,6 +1,6 @@
 # ANNCSU Aggiudicatari – QGIS Processing Tool
 
-Questo script processingper QGIS permette di ricostruire, per ciascun comune, 
+Questo script processing per QGIS permette di ricostruire, per ciascun comune, 
 chi si è aggiudicato i finanziamenti della misura 1.3.1 (ANNCSU),
 incrociando open data PA Digitale 2026 e ANAC.
 
@@ -20,7 +20,6 @@ e produce:
 
 * filtro automatico su misura **ANNCSU**
 * join:
-
   * Comune → CUP
   * CUP → CIG
   * CIG → aggiudicatario
@@ -56,6 +55,7 @@ e produce:
     - CIG
     - importo finanziato
   * tabella Top operatori
+  * layer comuni con dettaglio per multi-CIG
 
 ---
 
@@ -79,6 +79,18 @@ anncsu-aggiudicatari.py
 * I file possono essere molto grandi → tempi di esecuzione lunghi
 * Non tutti i CUP hanno CIG associato
 * Non tutti i CIG hanno aggiudicatario disponibile
+
+---
+## Changelog
+
+### v2.2
+- supporto multi-CIG per CUP
+- layer dettaglio CIG
+- fallback su nome comune
+- incremento copertura comuni con match
+
+### v2.2.1
+- corretta individuazione aggiudicatario in caso di mancata denominazione (per ogni CIG matchato: se c’è denominazione usa quella, altrimenti se c’è codice_fiscale usa quello come identificatore operatore, altrimenti il match resta comunque valido, ma come MATCH_SENZA_IDENTIFICATIVO)
 
 ---
 
